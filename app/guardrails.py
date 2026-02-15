@@ -1,4 +1,5 @@
-"""Guardrails: parse and normalize AI extraction output to {to, message, type}."""
+"""Guardrails: parse and normalize AI extraction output to
+{to, message, type}."""
 
 import json
 import re
@@ -9,7 +10,8 @@ _TYPE_KEYS = ("type", "channel", "method")
 
 
 def _extract_json_candidate(raw: str) -> str | None:
-    """Extract a JSON object string from raw text (Markdown blocks, embedded, etc)."""
+    """Extract a JSON object string from raw text (Markdown blocks,
+    embedded, etc)."""
     if not raw or not raw.strip():
         return None
 
@@ -45,7 +47,7 @@ def _extract_json_candidate(raw: str) -> str | None:
             elif c == "}":
                 depth -= 1
                 if depth == 0:
-                    return raw[start : i + 1]
+                    return raw[start: i + 1]
             elif c in ('"', "'"):
                 in_string = True
                 quote_char = c
@@ -89,7 +91,9 @@ def _try_parse_json(s: str) -> dict | None:
 def _normalize_keys(data: dict) -> dict | None:
     """Map alternate keys to canonical {to, message, type}. Validate type."""
     result = {}
-    by_lower = {k.lower(): (k, v) for k, v in data.items() if isinstance(k, str)}
+    by_lower = {
+        k.lower(): (k, v) for k, v in data.items() if isinstance(k, str)
+    }
 
     # to
     for k in _TO_KEYS:
@@ -126,7 +130,8 @@ def parse_extraction(raw: str) -> dict | None:
     """
     Parse AI extraction output into {to, message, type} or None if invalid.
     Handles: Markdown blocks, alternate keys, single quotes, unquoted keys,
-    extra fields, missing message. Fails on: truncation, refusals, missing to/type.
+    extra fields, missing message. Fails on: truncation, refusals, missing
+    to/type.
     """
     candidate = _extract_json_candidate(raw)
     if not candidate:
