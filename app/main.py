@@ -1,3 +1,6 @@
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -6,10 +9,21 @@ import uuid
 
 import httpx
 
-from client import ai_extract, notify
+from client import ai_extract, close_client, notify
 from guardrails import parse_extraction
 
-app = FastAPI(title="Notification Service (Technical Test)")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await close_client()
+
+
+# Throttle concurrent pipelines to avoid overwhelming the server
+_pipeline_semaphore = asyncio.Semaphore(30)
+
+
+app = FastAPI(title="Notification Service (Technical Test)", lifespan=lifespan)
 
 SYSTEM_PROMPT = (
     "Extract notification intent from the user message. Return ONLY a valid JSON "
@@ -47,36 +61,37 @@ def _generate_id() -> str:
 
 
 async def _run_pipeline(req_id: str) -> None:
-    """Extract -> guardrails -> notify. Updates _store status."""
-    entry = _store.get(req_id)
-    if not entry:
-        return
+    """Extract -> guardrails -> notify. Limited by semaphore."""
+    async with _pipeline_semaphore:
+        entry = _store.get(req_id)
+        if not entry:
+            return
 
-    entry["status"] = "processing"
-    user_input = entry.get("user_input", "")
+        entry["status"] = "processing"
+        user_input = entry.get("user_input", "")
 
-    try:
-        content = await ai_extract(SYSTEM_PROMPT, user_input)
-    except httpx.HTTPStatusError:
-        entry["status"] = "failed"
-        return
+        try:
+            content = await ai_extract(SYSTEM_PROMPT, user_input)
+        except httpx.HTTPStatusError:
+            entry["status"] = "failed"
+            return
 
-    parsed = parse_extraction(content)
-    if not parsed:
-        entry["status"] = "failed"
-        return
+        parsed = parse_extraction(content)
+        if not parsed:
+            entry["status"] = "failed"
+            return
 
-    try:
-        await notify(
-            to=parsed["to"],
-            message=parsed["message"],
-            type_=parsed["type"],
-        )
-    except httpx.HTTPStatusError:
-        entry["status"] = "failed"
-        return
+        try:
+            await notify(
+                to=parsed["to"],
+                message=parsed["message"],
+                type_=parsed["type"],
+            )
+        except httpx.HTTPStatusError:
+            entry["status"] = "failed"
+            return
 
-    entry["status"] = "sent"
+        entry["status"] = "sent"
 
 
 # --- Endpoints ---
