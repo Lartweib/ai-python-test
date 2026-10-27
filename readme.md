@@ -129,22 +129,35 @@ GET /v1/requests/{id}          → {id, status}
 
 ### Running the tests
 
-The suite uses only the standard library (`unittest`) plus the pinned runtime dependencies. It needs no live provider, randomness or real long sleeps.
+The suite uses only the standard library (`unittest`) plus the pinned runtime dependencies. The default run needs no live provider, randomness or real long sleeps.
+
+| Layer | Modules | Runs against |
+|---|---|---|
+| Unit | `test_settings_models`, `test_store`, `test_extraction`, `test_provider_client` | Pure logic; HTTP via `httpx.MockTransport` |
+| Integration | `test_pipeline`, `test_api` | Real workers and lifespan; scripted provider |
+| End-to-end (deterministic) | `test_end_to_end`, `test_smoke` | Full HTTP flow in process |
+| Provider contract | `test_provider_contract` | The real `provider/responses.py` generator, seeded; skipped when `provider/` is absent |
+| Live end-to-end (opt-in) | `test_live` | A running stack; skipped unless `LIVE_BASE_URL` is set |
 
 ```sh
 python3.12 -m venv .venv && .venv/bin/pip install -r app/requirements.txt
 PYTHONPATH=app .venv/bin/python -m unittest discover -s app/tests -v
 # or inside the real image:
 docker compose run --rm --no-deps app python -m unittest discover -s tests
-# live probe once the stack is up:
+# live tests and probe once the stack is up:
+LIVE_BASE_URL=http://localhost:5000 PYTHONPATH=app .venv/bin/python -m unittest discover -s app/tests -p test_live.py -v
 .venv/bin/python app/smoke.py --base-url http://localhost:5000 --timeout 120
 ```
+
+CI (`.github/workflows/ci.yml`) runs the suite with a 95% branch-coverage floor. A second job runs the suite inside the app image and the live tests against the Compose stack.
 
 > On macOS, AirPlay Receiver occupies port 5000. Either disable it, or publish the provider's port 5000 elsewhere through a local Compose override. Inside the Compose network nothing changes.
 
 ### Verification evidence (2026-10-27, Python 3.12.11, pinned dependencies)
 
-- **Deterministic suite:** 156 tests pass on the host venv and inside the app image; 98% branch coverage of `app/` (`coverage` installed ad hoc, not a project dependency).
+- **Deterministic suite:** 162 tests pass on the host venv and inside the app image (contract and live tests skip there); 99% branch coverage of `app/` (`coverage` installed ad hoc, not a project dependency).
+- **Provider contract:** 5,000 seeded draws from the real generator give exact payloads or terminal rejections only.
+- **Live tests:** both pass against the running Compose stack.
 - **Live smoke** (5 requests against the real mock): 5/5 `sent`, at most 4.1 s to terminal.
 - **k6 `load-test`** (unchanged script, 200 VUs, 40 s): 19,236/19,236 checks passed, 0% HTTP failures, avg 0.95 ms and p95 2.5 ms request latency.
 - **Delivery, observed separately from k6:** all 2,748 accepted requests reached a terminal state. 2,278 were `sent`. 470 were `failed`: 285 AI refusals and 185 invalid extractions with a missing `to`/`type`. That is 82.9% sent against the mock's 83.3% recoverable share. The run had 0 provider 429s, 0 failed notify attempts and 1.0 AI attempts per request. The backlog drained about 8 minutes after the load started, at about 5 notifications/s, which is the provider's ceiling.
