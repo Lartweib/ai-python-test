@@ -229,6 +229,14 @@ If Python 3.12 is unavailable, use the built app image to run `python -m unittes
 
 No migration required. Add tests and cohesive modules, wire routes/lifespan, validate with pinned Python 3.12, then rebuild the existing image. Keep one app process and unchanged network configuration. Append operational guidance without replacing the original challenge text. The proposal contains rollback guidance; in-memory records and unsent work are lost on restart or rollback.
 
+## Implementation Notes (deviations recorded during apply)
+
+- **No store or gate lock.** `RequestStore` methods and the gate's check-and-reserve step are synchronous and never await, so each is atomic on the single event loop. This keeps the "no await while holding the lock" guarantee by construction, and lets a cancelled worker record its outcome without awaiting a lock.
+- **Sweeper uses real time for its interval.** Expiry decisions use the injected clock; only the sweep cadence uses `asyncio.sleep`, so fake-time tests don't spin the sweeper. While work is outstanding, the sweeper also logs a `state_summary` (counts and queue depth) as backlog/drain evidence.
+- **Shutdown accounting includes unadmitted records.** `fail_outstanding` marks every nonterminal record `failed` (`shutdown`, or `delivery_unknown` for records still processing), because in-memory state is lost on exit anyway.
+- **Oversized AI body or content** maps to the terminal `extraction_invalid` category; it is not retried.
+- **Live verification on macOS** used a scratch Compose override that published host port 5001 instead of 5000 (AirPlay Receiver holds port 5000). The committed `docker-compose.yaml` is unchanged, and k6 still targets `provider:5000` inside the network.
+
 ## Open Questions
 
 - Nonblocking scope assumption: persistence across restarts and multiple worker processes were offered as a clarification; absent a response, this plan explicitly chooses one process and in-memory state. A later durability requirement changes store, claim/recovery and limiter design together.
