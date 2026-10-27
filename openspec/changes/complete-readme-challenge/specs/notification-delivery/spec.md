@@ -4,7 +4,7 @@
 
 Define authenticated delivery, rate/attempt bounds, and evidence needed to assess challenge completion. `README` denotes explicit challenge behavior; `Decision` denotes selected reliability policy informed by `provider/app.py`.
 
-## Requirements
+## ADDED Requirements
 
 ### Requirement: DEL-1 — Send validated payload and verify acknowledgment
 

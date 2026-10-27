@@ -6,7 +6,7 @@ Define the externally observable request contract and bounded processing lifecyc
 
 **Origin:** `README` labels identify explicit `readme.md` obligations. `Decision` labels identify chosen behavior for unspecified cases, under the single-process, in-memory assumption. Numeric configuration defaults belong in `design.md`.
 
-## Requirements
+## ADDED Requirements
 
 ### Requirement: API-1 — Create an independent request
 

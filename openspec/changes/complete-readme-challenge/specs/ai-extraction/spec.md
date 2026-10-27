@@ -4,7 +4,7 @@
 
 Define extraction, normalization, and rejection behavior for the supplied noisy AI service. `README` denotes the challenge contract; `Decision` denotes explicit guardrail policy. `provider/responses.py` is fixture evidence, not an implementation dependency.
 
-## Requirements
+## ADDED Requirements
 
 ### Requirement: AI-1 — Authenticate and instruct extraction
 
