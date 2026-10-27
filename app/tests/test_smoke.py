@@ -1,10 +1,14 @@
+import io
 import itertools
 import json
 import unittest
+from contextlib import redirect_stdout
+from unittest import mock
 
 import httpx
 
 import support  # noqa: F401
+import smoke
 from smoke import run_smoke
 
 
@@ -83,6 +87,33 @@ class SmokeTest(unittest.TestCase):
         summary = json.loads(run(FakeService()).to_json())
         self.assertEqual(summary["requests"], 2)
         self.assertIn("max_seconds_to_terminal", summary)
+
+
+class MainTest(unittest.TestCase):
+    def run_main(self, service, *argv):
+        seen, real_client = {}, httpx.Client
+
+        def client(base_url, timeout):
+            seen["base_url"] = base_url
+            return real_client(transport=httpx.MockTransport(service.handler), base_url=base_url, timeout=timeout)
+
+        out = io.StringIO()
+        with mock.patch.object(smoke.httpx, "Client", client), redirect_stdout(out):
+            code = smoke.main(list(argv))
+        return code, json.loads(out.getvalue()), seen["base_url"]
+
+    def test_exits_zero_and_prints_report_when_all_requests_resolve(self):
+        code, summary, base_url = self.run_main(FakeService(progression=("sent",)), "--base-url", "http://svc:1")
+        self.assertEqual(code, 0)
+        self.assertEqual(base_url, "http://svc:1")
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["requests"], len(smoke.DEFAULT_INPUTS))
+
+    def test_exits_nonzero_when_requests_are_unresolved(self):
+        code, summary, _ = self.run_main(FakeService(progression=("queued",)), "--timeout", "0")
+        self.assertEqual(code, 1)
+        self.assertFalse(summary["ok"])
+        self.assertEqual(len(summary["unresolved"]), len(smoke.DEFAULT_INPUTS))
 
 
 if __name__ == "__main__":
