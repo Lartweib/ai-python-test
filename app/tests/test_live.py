@@ -8,6 +8,7 @@ Skipped unless ``LIVE_BASE_URL`` is set, e.g.:
 
 import os
 import unittest
+import uuid
 
 import httpx
 
@@ -33,6 +34,20 @@ class LiveStackTest(unittest.TestCase):
             self.assertEqual(client.get("/health").json(), {"status": "ok"})
             self.assertEqual(client.get("/v1/requests/does-not-exist").status_code, 404)
             self.assertEqual(client.post("/v1/requests", json={"user_input": ""}).status_code, 422)
+
+    def test_idempotency_key_replays_and_metrics_are_exposed(self):
+        key = {"Idempotency-Key": f"live-{uuid.uuid4()}"}
+        body = {"user_input": "Manda un mail a feda@test.com diciendo hola"}
+        with httpx.Client(base_url=BASE_URL, timeout=10) as client:
+            first = client.post("/v1/requests", json=body, headers=key)
+            again = client.post("/v1/requests", json=body, headers=key)
+            self.assertEqual((first.status_code, again.status_code), (201, 201))
+            self.assertEqual(again.json(), first.json())
+            self.assertEqual(again.headers.get("idempotent-replayed"), "true")
+            metrics = client.get("/metrics")
+            self.assertEqual(metrics.status_code, 200)
+            self.assertIn("notify_idempotent_replays_total ", metrics.text)
+            self.assertIn("notify_up 1\n", metrics.text)
 
 
 if __name__ == "__main__":
