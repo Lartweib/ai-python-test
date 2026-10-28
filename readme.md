@@ -66,7 +66,7 @@ El motor de IA y el servicio de notificaciones están disponibles en `localhost:
 
 ## Implementación (solution notes)
 
-The original challenge text above is unchanged. This section describes the implemented solution. The full specification, design and task list are in [`openspec/changes/complete-readme-challenge`](openspec/changes/complete-readme-challenge/).
+The original challenge text above is unchanged. This section describes the implemented solution. The current specifications are in [`openspec/specs`](openspec/specs/); the archived proposal, design and task list are in [`openspec/changes/archive/2026-10-28-complete-readme-challenge`](openspec/changes/archive/2026-10-28-complete-readme-challenge/).
 
 ### Architecture
 

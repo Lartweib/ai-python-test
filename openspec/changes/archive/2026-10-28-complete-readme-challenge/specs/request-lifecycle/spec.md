@@ -100,3 +100,29 @@ Define the externally observable request contract and bounded processing lifecyc
 - GIVEN admitted queued and active requests, including a stalled upstream operation
 - WHEN shutdown begins and the drain budget expires
 - THEN new work is rejected, outstanding admitted work is accounted for, pending operations terminate, and shared resources close within the documented bound.
+
+### Requirement: API-7 — Report service availability
+
+**Decision:** the service SHOULD expose `GET /health`, outside the README contract. It MUST return `200 {"status":"ok"}` while new work is accepted and `503 {"status":"unavailable"}` once admission is closed (stopping, or after a fatal worker exit). It MUST NOT call the provider, so it reports this service only.
+
+#### Scenario: Health follows admission state
+
+- GIVEN a running service
+- WHEN `/health` is requested before and after admission closes
+- THEN it returns 200 `ok` and then 503 `unavailable`, and no upstream call is made.
+
+### Requirement: API-8 — Optional idempotent creation
+
+**Decision:** `POST /v1/requests` MAY carry an `Idempotency-Key` header of 1–255 visible ASCII characters. Without the header, creation is unchanged. A repeat with the same key and identical `user_input` MUST return the original `201 {"id"}` with `Idempotent-Replayed: true` and MUST NOT create a record or trigger work, even when the store is full or admission is closed. Reusing a key with a different `user_input` MUST return `422 {"detail":"idempotency_key_reused"}`, and a malformed key MUST return `400 {"detail":"invalid_idempotency_key"}`; neither creates a record. A key lives as long as its record, and eviction releases it. Keys are in-memory, like the records.
+
+#### Scenario: Replay, mismatch and malformed keys
+
+- GIVEN a request created with key `K` and input `X`
+- WHEN the client repeats `K` with `X`, then `K` with `Y`, then sends a malformed key
+- THEN the first returns the same id marked as replayed, the second returns 422, the third returns 400, and exactly one record exists.
+
+#### Scenario: Key released on eviction
+
+- GIVEN a keyed terminal record that is evicted to make room
+- WHEN the same key is used again
+- THEN a new record is created rather than a replay.

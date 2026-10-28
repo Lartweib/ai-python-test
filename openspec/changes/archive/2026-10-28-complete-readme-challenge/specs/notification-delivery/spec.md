@@ -57,3 +57,13 @@ Define authenticated delivery, rate/attempt bounds, and evidence needed to asses
 - GIVEN healthy and failing controlled end-to-end requests plus captured logs
 - WHEN verification polls to terminal states and inspects provider call records
 - THEN it verifies notify payload/count and terminal outcomes separately from HTTP response checks, and diagnostics expose useful failure categories without sensitive input or credentials.
+
+### Requirement: DEL-5 — Expose operational metrics
+
+**Decision:** the service SHOULD expose `GET /metrics` in the Prometheus text format (0.0.4) without adding a client library. It MUST report current requests by status, queue depth and capacity, configured workers, an availability gauge, and monotonic counters for created, replayed, admitted and evicted requests, terminal outcomes by failure code (every code pre-declared at zero), AI and delivery attempts, provider dispatches and 429 pauses, plus an admission-to-terminal time summary. Counters MUST survive record eviction. Labels MUST be fixed codes only and MUST NOT include user input, destinations, messages or idempotency keys. Scraping MUST NOT call the provider.
+
+#### Scenario: Metrics reflect delivery without leaking content
+
+- GIVEN a completed request created with an idempotency key and containing an email address
+- WHEN `/metrics` is scraped
+- THEN the output is well-formed exposition text with the sent outcome and dispatch counted, no upstream call is made, and neither the address nor the key appears.

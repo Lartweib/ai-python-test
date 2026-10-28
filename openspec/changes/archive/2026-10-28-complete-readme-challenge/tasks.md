@@ -110,3 +110,10 @@ Baseline research completed only source/AST inspection and deterministic mock-ou
 ## Next-agent launch prompt
 
 > Implement SDD change `complete-readme-challenge` on branch `Alvaro/sdd-challenge-plan` using the `sdd-apply` workflow. Start with `openspec/changes/complete-readme-challenge/tasks.md` and its linked proposal/specs/design. Follow the task order and mark only completed verified tasks. Preserve the README API, provider/evaluator fixtures, pinned dependencies, Docker `main:app` imports, and one-process in-memory scope. Use deterministic tests before live Compose/k6 checks; report terminal delivery separately from availability. Do not guess missing AI fields or resend uncertain notifications. Record actual verification and remaining limitations. After implementation, hand off to `sdd-verify`; do not archive an unverified change.
+
+## Phase 7: Post-plan additions (requested after verification)
+
+- [x] 7.1 Add the provider contract test, the opt-in live test, `smoke.py` CLI tests and a CI workflow with a 95% branch-coverage floor plus image and live-stack jobs. **Acceptance:** the contract test fails on a mutated generator; live tests pass against the Compose stack (DEL-4).
+- [x] 7.2 Declare `app = FastAPI(...)` literally in `app/main.py`, keep `create_app()` for isolated test instances, and add `GET /health`. **Acceptance:** the real Uvicorn server still runs the lifespan; health follows admission state (API-7).
+- [x] 7.3 Add the optional `Idempotency-Key` on creation, backed by the store. **Acceptance:** replay, mismatch, malformed-key, full/closed and eviction cases are tested; k6 is unaffected (API-8).
+- [x] 7.4 Add `GET /metrics` with store and gate counters. **Acceptance:** the format is parsed in tests, values follow state, no content leaks, and live scrapes show real counts (DEL-5).

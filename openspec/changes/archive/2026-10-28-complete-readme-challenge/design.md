@@ -236,6 +236,7 @@ No migration required. Add tests and cohesive modules, wire routes/lifespan, val
 - **Shutdown accounting includes unadmitted records.** `fail_outstanding` marks every nonterminal record `failed` (`shutdown`, or `delivery_unknown` for records still processing), because in-memory state is lost on exit anyway.
 - **Oversized AI body or content** maps to the terminal `extraction_invalid` category; it is not retried.
 - **Live verification on macOS** used a scratch Compose override that published host port 5001 instead of 5000 (AirPlay Receiver holds port 5000). The committed `docker-compose.yaml` is unchanged, and k6 still targets `provider:5000` inside the network.
+- **Post-plan additions** (Phase 7, API-7, API-8, DEL-5): `GET /health`, an optional `Idempotency-Key` on creation and a Prometheus `GET /metrics`, all outside the README contract and with no new dependencies. `main.py` declares `app = FastAPI(...)` literally and attaches routes through `configure(app)`; `create_app()` wraps it for isolated test instances, and the lifespan is set on `app.router.lifespan_context`. Idempotency keys and counters live in `RequestStore` (`create_idempotent`, `stats`); dispatch and 429 counters live in `NotificationGate`. A durable, multi-instance version is outlined in the README's "Production path".
 
 ## Open Questions
 
