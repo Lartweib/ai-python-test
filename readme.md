@@ -159,7 +159,7 @@ CI (`.github/workflows/ci.yml`) runs the suite with a 95% branch-coverage floor.
 
 ### Verification evidence (2026-10-27, Python 3.12.11, pinned dependencies)
 
-- **Deterministic suite:** 186 tests pass on the host venv and inside the app image (contract and live tests skip there); 99% branch coverage of `app/` (`coverage` installed ad hoc, not a project dependency).
+- **Deterministic suite:** 187 tests pass on the host venv and inside the app image (contract and live tests skip there); 99% branch coverage of `app/` (`coverage` installed ad hoc, not a project dependency).
 - **Provider contract:** 5,000 seeded draws from the real generator give exact payloads or terminal rejections only.
 - **Live tests:** all 3 pass against the running Compose stack, including the idempotent replay and `/metrics`.
 - **Live smoke** (5 requests against the real mock): 5/5 `sent`, at most 4.1 s to terminal.
