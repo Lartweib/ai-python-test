@@ -48,7 +48,7 @@ jobs:
       - name: Run the suite inside the app image
         run: docker compose run --rm --no-deps app python -m unittest discover -s tests
       - name: Wait for the app port
-        run: timeout 60 bash -c 'until curl -s -o /dev/null http://localhost:5000/docs; do sleep 1; done'
+        run: timeout 60 bash -c 'until curl -sf -o /dev/null http://localhost:5000/health; do sleep 1; done'
       - name: Live end-to-end test
         env:
           LIVE_BASE_URL: http://localhost:5000

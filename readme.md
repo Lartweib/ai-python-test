@@ -88,7 +88,7 @@ GET /v1/requests/{id}          → {id, status}
 
 | Module | Responsibility |
 |---|---|
-| `app/main.py` | `create_app()` factory, module-level `app`, lifespan, three routes, sanitized 422s |
+| `app/main.py` | Module-level `app = FastAPI()` plus a `create_app()` factory for isolated test instances; lifespan, three contract routes, `/health`, sanitized 422s |
 | `app/settings.py` | Validated environment-backed configuration and safety limits |
 | `app/models.py` | Public schemas, statuses, immutable snapshots, internal failure codes |
 | `app/store.py` | Records, atomic admission, conditional transitions, expiry and eviction |
@@ -108,6 +108,7 @@ GET /v1/requests/{id}          → {id, status}
 | Unknown or evicted ID | `404 {"detail":"request_not_found"}` |
 | Invalid body (missing, non-string, blank, too long, extra fields, bad JSON) | `422` that never echoes input |
 | Queue full, store full, stopping | `503` with `queue_full`, `store_full` or `shutting_down`; a rejected process call can be retried later |
+| `GET /health` (extra, outside the contract) | `200 {"status":"ok"}` while accepting work; `503 {"status":"unavailable"}` when stopping or degraded; never calls the provider |
 
 ### Guardrails
 
@@ -155,7 +156,7 @@ CI (`.github/workflows/ci.yml`) runs the suite with a 95% branch-coverage floor.
 
 ### Verification evidence (2026-10-27, Python 3.12.11, pinned dependencies)
 
-- **Deterministic suite:** 162 tests pass on the host venv and inside the app image (contract and live tests skip there); 99% branch coverage of `app/` (`coverage` installed ad hoc, not a project dependency).
+- **Deterministic suite:** 165 tests pass on the host venv and inside the app image (contract and live tests skip there); 99% branch coverage of `app/` (`coverage` installed ad hoc, not a project dependency).
 - **Provider contract:** 5,000 seeded draws from the real generator give exact payloads or terminal rejections only.
 - **Live tests:** both pass against the running Compose stack.
 - **Live smoke** (5 requests against the real mock): 5/5 `sent`, at most 4.1 s to terminal.

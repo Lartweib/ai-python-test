@@ -28,8 +28,9 @@ class LiveStackTest(unittest.TestCase):
         # The mock refuses ~1 in 6 replies on purpose, so require some, not all, to be sent.
         self.assertGreater(report.counts.get("sent", 0), 0, report.to_json())
 
-    def test_unknown_id_and_invalid_body_follow_the_contract(self):
+    def test_health_unknown_id_and_invalid_body_follow_the_contract(self):
         with httpx.Client(base_url=BASE_URL, timeout=10) as client:
+            self.assertEqual(client.get("/health").json(), {"status": "ok"})
             self.assertEqual(client.get("/v1/requests/does-not-exist").status_code, 404)
             self.assertEqual(client.post("/v1/requests", json={"user_input": ""}).status_code, 422)
 
