@@ -88,13 +88,14 @@ GET /v1/requests/{id}          → {id, status}
 
 | Module | Responsibility |
 |---|---|
-| `app/main.py` | Module-level `app = FastAPI()` plus a `create_app()` factory for isolated test instances; lifespan, three contract routes, `/health`, sanitized 422s |
+| `app/main.py` | Module-level `app = FastAPI()` plus a `create_app()` factory for isolated test instances; lifespan, three contract routes, `/health`, `/metrics`, sanitized 422s |
 | `app/settings.py` | Validated environment-backed configuration and safety limits |
 | `app/models.py` | Public schemas, statuses, immutable snapshots, internal failure codes |
-| `app/store.py` | Records, atomic admission, conditional transitions, expiry and eviction |
+| `app/store.py` | Records, atomic admission, conditional transitions, expiry, eviction, idempotency keys and counters |
 | `app/extraction.py` | System prompt and deterministic normalizer/validator for noisy AI output |
 | `app/provider_client.py` | Authenticated, size-bounded HTTP calls with typed, retry-aware errors |
 | `app/pipeline.py` | Workers, retry budgets, notification gate, deadlines, graceful stop, structured logs |
+| `app/metrics.py` | Prometheus text exposition rendered at scrape time, no client library |
 | `app/smoke.py` | Live probe: create → process → poll every ID to a terminal state |
 
 ### API semantics
@@ -109,6 +110,8 @@ GET /v1/requests/{id}          → {id, status}
 | Invalid body (missing, non-string, blank, too long, extra fields, bad JSON) | `422` that never echoes input |
 | Queue full, store full, stopping | `503` with `queue_full`, `store_full` or `shutting_down`; a rejected process call can be retried later |
 | `GET /health` (extra, outside the contract) | `200 {"status":"ok"}` while accepting work; `503 {"status":"unavailable"}` when stopping or degraded; never calls the provider |
+| Create with `Idempotency-Key` (optional, extra) | First use: `201 {"id"}`. Same key and body: the same `201 {"id"}` plus `Idempotent-Replayed: true`, with nothing new created (even when the store is full or stopping). Same key, different body: `422 {"detail":"idempotency_key_reused"}`. Key not 1–255 visible ASCII characters: `400 {"detail":"invalid_idempotency_key"}`. A key lives as long as its record; eviction frees it |
+| `GET /metrics` (extra) | Prometheus text format: request gauges by status, queue depth/capacity, `notify_up`, outcome counters by failure code, AI and delivery attempts, provider dispatches and 429 pauses, replays, evictions and admission-to-terminal time. Labels are fixed codes only, never request content |
 
 ### Guardrails
 
@@ -134,7 +137,7 @@ The suite uses only the standard library (`unittest`) plus the pinned runtime de
 
 | Layer | Modules | Runs against |
 |---|---|---|
-| Unit | `test_settings_models`, `test_store`, `test_extraction`, `test_provider_client` | Pure logic; HTTP via `httpx.MockTransport` |
+| Unit | `test_settings_models`, `test_store`, `test_extraction`, `test_provider_client`, `test_metrics` | Pure logic; HTTP via `httpx.MockTransport` |
 | Integration | `test_pipeline`, `test_api` | Real workers and lifespan; scripted provider |
 | End-to-end (deterministic) | `test_end_to_end`, `test_smoke` | Full HTTP flow in process |
 | Provider contract | `test_provider_contract` | The real `provider/responses.py` generator, seeded; skipped when `provider/` is absent |
@@ -156,11 +159,11 @@ CI (`.github/workflows/ci.yml`) runs the suite with a 95% branch-coverage floor.
 
 ### Verification evidence (2026-10-27, Python 3.12.11, pinned dependencies)
 
-- **Deterministic suite:** 165 tests pass on the host venv and inside the app image (contract and live tests skip there); 99% branch coverage of `app/` (`coverage` installed ad hoc, not a project dependency).
+- **Deterministic suite:** 186 tests pass on the host venv and inside the app image (contract and live tests skip there); 99% branch coverage of `app/` (`coverage` installed ad hoc, not a project dependency).
 - **Provider contract:** 5,000 seeded draws from the real generator give exact payloads or terminal rejections only.
-- **Live tests:** both pass against the running Compose stack.
+- **Live tests:** all 3 pass against the running Compose stack, including the idempotent replay and `/metrics`.
 - **Live smoke** (5 requests against the real mock): 5/5 `sent`, at most 4.1 s to terminal.
-- **k6 `load-test`** (unchanged script, 200 VUs, 40 s): 19,236/19,236 checks passed, 0% HTTP failures, avg 0.95 ms and p95 2.5 ms request latency.
+- **k6 `load-test`** (unchanged script, 200 VUs, 40 s): 19,236/19,236 checks passed, 0% HTTP failures, avg 0.95 ms and p95 2.5 ms request latency. A rerun after adding idempotency keys and metrics (2026-10-28): 19,201/19,201 checks, 0% HTTP failures, p95 6.5 ms, with the stack already busy.
 - **Delivery, observed separately from k6:** all 2,748 accepted requests reached a terminal state. 2,278 were `sent`. 470 were `failed`: 285 AI refusals and 185 invalid extractions with a missing `to`/`type`. That is 82.9% sent against the mock's 83.3% recoverable share. The run had 0 provider 429s, 0 failed notify attempts and 1.0 AI attempts per request. The backlog drained about 8 minutes after the load started, at about 5 notifications/s, which is the provider's ceiling.
 
 ### Known limitations
@@ -169,3 +172,17 @@ CI (`.github/workflows/ci.yml`) runs the suite with a 95% branch-coverage floor.
 - Exactly-once delivery cannot be guaranteed: an uncertain notification outcome is reported as `failed` instead of risking a duplicate.
 - Throughput is bounded by the provider (50 notifications per 10 s), so a burst becomes a backlog. HTTP acceptance is not delivery.
 - The mock lowercases input and takes the text after the last `:` as the message (`"cita a las 10:00"` becomes `"00"`). The application deliberately does not compensate with its own regex extraction.
+
+### Production path (not implemented on purpose)
+
+The challenge runs one container through one load test, so these were left out to keep the evaluated stack exactly as supplied. The code isolates each concern, so every change stays local:
+
+| Need | Change | Touches |
+|---|---|---|
+| Survive restarts | Records in a database (e.g. Postgres) with the same conditional transitions (`UPDATE … WHERE status = …`) | `store.py` only; the pipeline already treats the store as the source of truth |
+| Don't lose pending work | A durable queue (e.g. Redis Streams, SQS) with acknowledgement after `finish`; the existing tombstone check already makes redelivery harmless | The queue passed to `Pipeline`, plus a startup sweep for records left `processing` |
+| Run several instances | Move the notification gate's window and cooldown to shared storage (e.g. Redis), so all instances together stay under 50 per 10 s | `NotificationGate` |
+| Durable idempotency | Keep `Idempotency-Key` in the database with a unique index and a TTL, instead of tying it to in-memory records | `store.py` |
+| Protect the API | Authentication (API keys or OAuth) and per-client rate limits in front of `/v1/*`; restrict `/metrics` to the scrape network | `main.py` or the ingress |
+| Observability | Scrape `/metrics` from Prometheus; add tracing (e.g. OpenTelemetry) across the AI and notify calls | `main.py`, `provider_client.py` |
+| Delivery truth | Ask the provider for idempotency keys or delivery lookups, so `delivery_unknown` can be resolved and safely retried | `provider_client.py`, `pipeline.py` |
