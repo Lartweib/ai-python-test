@@ -17,6 +17,7 @@ class ImportTest(unittest.TestCase):
         self.assertIn(("/v1/requests/{request_id}/process", ("POST",)), paths)
         self.assertIn(("/v1/requests/{request_id}", ("GET",)), paths)
         self.assertIn(("/health", ("GET",)), paths)
+        self.assertIn(("/metrics", ("GET",)), paths)
 
     def test_entry_point_declares_the_readme_instance_literally(self):
         # The README requires `app = FastAPI()` in app/main.py; reviewers may look for it verbatim.
@@ -105,6 +106,30 @@ class CreateTest(unittest.IsolatedAsyncioTestCase):
             res = await client.post("/v1/requests", json={"user_input": "x"})
             self.assertEqual(res.status_code, 503)
             self.assertEqual(res.json(), {"detail": "store_full"})
+
+
+class MetricsEndpointTest(unittest.IsolatedAsyncioTestCase):
+    async def test_metrics_reflect_completed_work_without_calling_upstream(self):
+        upstream = ScriptedUpstream()
+        async with running_app(upstream=upstream) as (app, client):
+            rid = (await client.post("/v1/requests", json={"user_input": "x"})).json()["id"]
+            await client.post(f"/v1/requests/{rid}/process")
+            await wait_for(lambda: app.state.store.get(rid).status.terminal)
+            calls = len(upstream.requests)
+            res = await client.get("/metrics")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.headers["content-type"], "text/plain; version=0.0.4; charset=utf-8")
+            self.assertIn('notify_requests_finished_total{status="sent",failure_code=""} 1\n', res.text)
+            self.assertIn("notify_provider_dispatches_total 1\n", res.text)
+            self.assertIn("notify_workers 2\n", res.text)
+            self.assertEqual(len(upstream.requests), calls)
+
+    async def test_metrics_never_expose_request_content(self):
+        async with running_app() as (app, client):
+            await client.post("/v1/requests", json={"user_input": "secret ana@test.com"}, headers={"Idempotency-Key": "k-1"})
+            text = (await client.get("/metrics")).text
+            self.assertNotIn("ana@test.com", text)
+            self.assertNotIn("k-1", text)
 
 
 class IdempotencyKeyTest(unittest.IsolatedAsyncioTestCase):

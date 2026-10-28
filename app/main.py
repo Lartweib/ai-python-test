@@ -12,8 +12,10 @@ from typing import Awaitable, Callable
 import httpx
 from fastapi import FastAPI, Header, Request, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
+from metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
+from metrics import render as render_metrics
 from models import RequestCreated, RequestStatus, create_request_model
 from pipeline import Pipeline
 from provider_client import ProviderClient, build_http_client
@@ -173,6 +175,12 @@ def configure(
         if request.app.state.store.closed:
             return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"status": "unavailable"})
         return {"status": "ok"}
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    async def metrics(request: Request):
+        state = request.app.state
+        text = render_metrics(state.store, state.queue, state.pipeline.gate, settings.workers)
+        return PlainTextResponse(text, headers={"content-type": METRICS_CONTENT_TYPE})
 
     return app
 

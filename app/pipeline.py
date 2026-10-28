@@ -51,6 +51,8 @@ class NotificationGate:
         self._cooldown = cooldown
         self._cooldown_until = float("-inf")
         self.reservations: deque[float] = deque()
+        self.dispatched_total = 0
+        self.rate_limited_total = 0
 
     def _wait_time(self, now: float) -> float:
         while self.reservations and now - self.reservations[0] >= self._window:
@@ -68,6 +70,7 @@ class NotificationGate:
             wait = self._wait_time(now)
             if wait <= 0:
                 self.reservations.append(now)
+                self.dispatched_total += 1
                 return
             if now + wait > deadline:
                 raise GateDeadline()
@@ -75,6 +78,7 @@ class NotificationGate:
 
     def penalize(self, retry_after: float | None = None) -> None:
         """Pause every worker after a 429; provider guidance may only lengthen the pause."""
+        self.rate_limited_total += 1
         delay = max(self._cooldown, retry_after or 0.0)
         self._cooldown_until = max(self._cooldown_until, self._clock() + delay)
 

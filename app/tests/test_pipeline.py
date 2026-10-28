@@ -82,6 +82,16 @@ class NotificationGateTest(unittest.IsolatedAsyncioTestCase):
             await gate.acquire(deadline=self.clock.now + 5)
         self.assertEqual(len(gate.reservations), 0)
 
+    async def test_counters_track_dispatches_and_penalties(self):
+        gate = self.make_gate()
+        for _ in range(3):
+            await gate.acquire(deadline=self.clock.now + 100)
+        gate.penalize()
+        gate.penalize(retry_after=20.0)
+        with self.assertRaises(GateDeadline):
+            await gate.acquire(deadline=self.clock.now + 1)
+        self.assertEqual((gate.dispatched_total, gate.rate_limited_total), (3, 2))
+
 
 class PipelineCase(unittest.IsolatedAsyncioTestCase):
     async def start_pipeline(self, upstream, **overrides):
