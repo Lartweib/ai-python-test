@@ -8,8 +8,8 @@ awaiting one from a cancelled worker.
 
 import asyncio
 import uuid
-from collections import OrderedDict
-from dataclasses import dataclass, replace
+from collections import Counter, OrderedDict
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Callable
 
@@ -38,9 +38,29 @@ class ShuttingDown(RuntimeError):
     pass
 
 
+class IdempotencyMismatch(ValueError):
+    """An idempotency key was reused with a different input."""
+
+
+@dataclass
+class StoreStats:
+    """Monotonic counters; they survive eviction, unlike the records themselves."""
+
+    created: int = 0
+    replayed: int = 0
+    admitted: int = 0
+    evicted: int = 0
+    ai_attempts: int = 0
+    notify_attempts: int = 0
+    outcomes: Counter = field(default_factory=Counter)  # (status, failure code or "") -> count
+    terminal_seconds_sum: float = 0.0  # admission -> terminal, admitted work only
+    terminal_seconds_count: int = 0
+
+
 @dataclass
 class _Record:
     snapshot: RequestSnapshot
+    idempotency_key: str | None = None
 
     def update(self, **changes) -> RequestSnapshot:
         self.snapshot = replace(self.snapshot, **changes)
@@ -55,7 +75,9 @@ class RequestStore:
         self._clock = clock
         self._records: dict[str, _Record] = {}
         self._terminal: OrderedDict[str, None] = OrderedDict()  # finish order, oldest first
+        self._keys: dict[str, str] = {}  # idempotency key -> request id, bounded by the records
         self._closed = False
+        self.stats = StoreStats()
 
     def __len__(self) -> int:
         return len(self._records)
@@ -76,7 +98,9 @@ class RequestStore:
             if not self._terminal:
                 raise StoreFull()
             oldest, _ = self._terminal.popitem(last=False)
-            del self._records[oldest]
+            evicted = self._records.pop(oldest)
+            self._keys.pop(evicted.idempotency_key, None)
+            self.stats.evicted += 1
         snapshot = RequestSnapshot(
             id=str(uuid.uuid4()),
             user_input=user_input,
@@ -85,7 +109,22 @@ class RequestStore:
             created_at=self._clock(),
         )
         self._records[snapshot.id] = _Record(snapshot)
+        self.stats.created += 1
         return snapshot
+
+    def create_idempotent(self, user_input: str, key: str) -> tuple[RequestSnapshot, bool]:
+        """Create once per key; a repeat with the same input returns the existing record (``True``)."""
+        request_id = self._keys.get(key)
+        if request_id is not None:
+            snapshot = self._records[request_id].snapshot
+            if snapshot.user_input != user_input:
+                raise IdempotencyMismatch()
+            self.stats.replayed += 1
+            return snapshot, True
+        snapshot = self.create(user_input)
+        self._records[snapshot.id].idempotency_key = key
+        self._keys[key] = snapshot.id
+        return snapshot, False
 
     def get(self, request_id: str) -> RequestSnapshot | None:
         record = self._records.get(request_id)
@@ -107,6 +146,7 @@ class RequestStore:
         except asyncio.QueueFull:
             raise QueueFull() from None
         now = self._clock()
+        self.stats.admitted += 1
         return AdmitResult.ACCEPTED, record.update(admitted=True, admitted_at=now, deadline=now + self._job_deadline)
 
     def start(self, request_id: str) -> RequestSnapshot | None:
@@ -137,9 +177,19 @@ class RequestStore:
             changes["ai_attempts"] = ai_attempts
         if notify_attempts is not None:
             changes["notify_attempts"] = notify_attempts
-        record.update(**changes)
+        snap = record.update(**changes)
         self._terminal[request_id] = None
+        self._count_outcome(snap)
         return True
+
+    def _count_outcome(self, snap: RequestSnapshot) -> None:
+        stats = self.stats
+        stats.outcomes[(snap.status.value, snap.failure_code.value if snap.failure_code else "")] += 1
+        stats.ai_attempts += snap.ai_attempts
+        stats.notify_attempts += snap.notify_attempts
+        if snap.admitted_at is not None:
+            stats.terminal_seconds_sum += snap.finished_at - snap.admitted_at
+            stats.terminal_seconds_count += 1
 
     def expire(self) -> list[str]:
         """Fail abandoned unadmitted records and admitted work still queued past its deadline."""

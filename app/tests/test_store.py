@@ -4,7 +4,15 @@ import uuid
 
 from support import FakeClock
 from models import FailureCode, Status
-from store import AdmitResult, QueueFull, RequestNotFound, RequestStore, ShuttingDown, StoreFull
+from store import (
+    AdmitResult,
+    IdempotencyMismatch,
+    QueueFull,
+    RequestNotFound,
+    RequestStore,
+    ShuttingDown,
+    StoreFull,
+)
 
 
 def make_store(capacity=10, ttl=100.0, deadline=50.0, clock=None):
@@ -248,6 +256,106 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual(store.get(waiting.id).failure_code, FailureCode.SHUTDOWN)
         self.assertEqual(store.get(running.id).failure_code, FailureCode.DELIVERY_UNKNOWN)
         self.assertEqual(store.get(done.id).status, Status.SENT)
+
+
+class IdempotencyTest(unittest.TestCase):
+    def test_first_use_creates_and_repeat_replays_the_same_record(self):
+        store, _ = make_store()
+        first, replayed = store.create_idempotent("hola", "key-1")
+        self.assertFalse(replayed)
+        again, replayed = store.create_idempotent("hola", "key-1")
+        self.assertTrue(replayed)
+        self.assertEqual(again.id, first.id)
+        self.assertEqual(len(store), 1)
+
+    def test_replay_returns_the_current_state(self):
+        store, _ = make_store()
+        snap, _ = store.create_idempotent("hola", "k")
+        store.admit(snap.id, asyncio.Queue())
+        store.start(snap.id)
+        store.finish(snap.id, Status.SENT)
+        again, replayed = store.create_idempotent("hola", "k")
+        self.assertTrue(replayed)
+        self.assertEqual(again.status, Status.SENT)
+
+    def test_reusing_a_key_with_a_different_input_is_rejected(self):
+        store, _ = make_store()
+        store.create_idempotent("hola", "k")
+        with self.assertRaises(IdempotencyMismatch):
+            store.create_idempotent("adios", "k")
+        self.assertEqual(len(store), 1)
+
+    def test_distinct_keys_and_unkeyed_creates_are_independent(self):
+        store, _ = make_store()
+        a, _ = store.create_idempotent("hola", "a")
+        b, _ = store.create_idempotent("hola", "b")
+        c = store.create("hola")
+        self.assertEqual(len({a.id, b.id, c.id}), 3)
+
+    def test_replay_succeeds_when_full_or_closed_because_nothing_is_created(self):
+        store, _ = make_store(capacity=1)
+        snap, _ = store.create_idempotent("hola", "k")
+        store.close()
+        again, replayed = store.create_idempotent("hola", "k")
+        self.assertEqual((again.id, replayed), (snap.id, True))
+        with self.assertRaises(ShuttingDown):
+            store.create_idempotent("hola", "other")
+
+    def test_new_key_is_not_registered_when_creation_fails(self):
+        store, _ = make_store(capacity=1)
+        store.admit(store.create("busy").id, asyncio.Queue())
+        with self.assertRaises(StoreFull):
+            store.create_idempotent("hola", "k")
+        store2, _ = make_store(capacity=1)
+        self.assertFalse(store2.create_idempotent("hola", "k")[1])
+
+    def test_eviction_releases_the_key(self):
+        store, _ = make_store(capacity=1)
+        old, _ = store.create_idempotent("hola", "k")
+        store.admit(old.id, asyncio.Queue())
+        store.start(old.id)
+        store.finish(old.id, Status.SENT)
+        filler = store.create("filler")  # evicts the keyed record
+        self.assertIsNone(store.get(old.id))
+        store.finish(filler.id, Status.FAILED, failure_code=FailureCode.SHUTDOWN)  # make room again
+        fresh, replayed = store.create_idempotent("a different input is fine now", "k")
+        self.assertFalse(replayed)
+        self.assertNotEqual(fresh.id, old.id)
+
+
+class StatsTest(unittest.TestCase):
+    def test_counters_track_lifecycle_and_outcomes(self):
+        store, clock = make_store(capacity=2)
+        queue = asyncio.Queue()
+        sent, _ = store.create_idempotent("a", "k")
+        store.create_idempotent("a", "k")
+        store.admit(sent.id, queue)
+        store.start(sent.id)
+        clock.advance(2.5)
+        store.finish(sent.id, Status.SENT, ai_attempts=1, notify_attempts=2)
+        failed = store.create("b")
+        store.admit(failed.id, queue)
+        store.start(failed.id)
+        clock.advance(1.5)
+        store.finish(failed.id, Status.FAILED, failure_code=FailureCode.EXTRACTION_REFUSED, ai_attempts=1)
+        store.finish(failed.id, Status.SENT)  # ignored: already terminal
+        store.create("c")  # evicts the oldest terminal record
+
+        stats = store.stats
+        self.assertEqual((stats.created, stats.replayed, stats.admitted, stats.evicted), (3, 1, 2, 1))
+        self.assertEqual(stats.outcomes, {("sent", ""): 1, ("failed", "extraction_refused"): 1})
+        self.assertEqual((stats.ai_attempts, stats.notify_attempts), (2, 2))
+        self.assertEqual((stats.terminal_seconds_count, stats.terminal_seconds_sum), (2, 4.0))
+
+    def test_expiry_and_shutdown_outcomes_are_counted_without_timing_unadmitted_work(self):
+        store, clock = make_store(ttl=10.0)
+        store.create("idle")
+        clock.advance(10.0)
+        store.expire()
+        store.admit(store.create("queued").id, asyncio.Queue())
+        store.fail_outstanding()
+        self.assertEqual(store.stats.outcomes, {("failed", "unadmitted_expired"): 1, ("failed", "shutdown"): 1})
+        self.assertEqual(store.stats.terminal_seconds_count, 1)
 
 
 if __name__ == "__main__":
