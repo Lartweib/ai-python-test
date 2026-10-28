@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: unit, integration, e2e and provider contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements.txt
+      # coverage is a CI-only tool, not an app dependency.
+      - run: pip install -r app/requirements.txt coverage==7.6.1
+      - name: Run suite with branch coverage
+        working-directory: app
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m coverage run --branch --source=. -m unittest discover -s tests -v
+          python -m coverage report --omit='tests/*' --show-missing --fail-under=95
+
+  live:
+    name: image tests and live stack
+    runs-on: ubuntu-latest
+    needs: tests
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: app/requirements.txt
+      - run: pip install -r app/requirements.txt
+      - name: Start provider and app
+        run: |
+          docker compose up -d --build --wait provider
+          docker compose up -d --build app
+      - name: Run the suite inside the app image
+        run: docker compose run --rm --no-deps app python -m unittest discover -s tests
+      - name: Wait for the app port
+        run: timeout 60 bash -c 'until curl -sf -o /dev/null http://localhost:5000/health; do sleep 1; done'
+      - name: Live end-to-end test
+        env:
+          LIVE_BASE_URL: http://localhost:5000
+          PYTHONPATH: app
+        run: python -m unittest discover -s app/tests -p test_live.py -v
+      - name: Service logs
+        if: failure()
+        run: docker compose logs provider app
+      - if: always()
+        run: docker compose down -v
