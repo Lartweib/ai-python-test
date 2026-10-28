@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from pathlib import Path
 
 from support import ScriptedUpstream, running_app, test_settings, wait_for
 
@@ -15,6 +16,29 @@ class ImportTest(unittest.TestCase):
         self.assertIn(("/v1/requests", ("POST",)), paths)
         self.assertIn(("/v1/requests/{request_id}/process", ("POST",)), paths)
         self.assertIn(("/v1/requests/{request_id}", ("GET",)), paths)
+        self.assertIn(("/health", ("GET",)), paths)
+
+    def test_entry_point_declares_the_readme_instance_literally(self):
+        # The README requires `app = FastAPI()` in app/main.py; reviewers may look for it verbatim.
+        import main
+
+        source = Path(main.__file__).read_text(encoding="utf-8")
+        self.assertRegex(source, r"(?m)^app = FastAPI\(")
+
+
+class HealthTest(unittest.IsolatedAsyncioTestCase):
+    async def test_health_is_ok_while_accepting_work_without_calling_upstream(self):
+        upstream = ScriptedUpstream()
+        async with running_app(upstream=upstream) as (app, client):
+            res = await client.get("/health")
+            self.assertEqual((res.status_code, res.json()), (200, {"status": "ok"}))
+            self.assertEqual(upstream.requests, [])
+
+    async def test_health_is_503_once_admission_is_closed(self):
+        async with running_app() as (app, client):
+            app.state.store.close()
+            res = await client.get("/health")
+            self.assertEqual((res.status_code, res.json()), (503, {"status": "unavailable"}))
 
 
 class CreateTest(unittest.IsolatedAsyncioTestCase):

@@ -22,6 +22,7 @@ from store import AdmitResult, QueueFull, RequestNotFound, RequestStore, Shuttin
 logging.basicConfig(level=os.environ.get("NOTIFY_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per upstream call is too noisy under load
 
+TITLE = "Notification Service (Technical Test)"
 NOT_FOUND = {"detail": "request_not_found"}
 
 
@@ -46,6 +47,19 @@ def create_app(
     sleep: Callable[[float], Awaitable[None]] | None = None,
     rand: Callable[[], float] | None = None,
 ) -> FastAPI:
+    """Build an isolated, fully wired instance (used by tests)."""
+    return configure(FastAPI(title=TITLE), settings, transport, clock, sleep, rand)
+
+
+def configure(
+    app: FastAPI,
+    settings: Settings | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+    rand: Callable[[], float] | None = None,
+) -> FastAPI:
+    """Attach the lifespan, error handler and routes to ``app``; resources start only with the lifespan."""
     settings = settings or Settings.from_env()
     clock = clock or time.monotonic
     sleep = sleep or asyncio.sleep
@@ -79,7 +93,7 @@ def create_app(
             await pipeline.stop()
             await http.aclose()
 
-    app = FastAPI(title="Notification Service (Technical Test)", lifespan=lifespan)
+    app.router.lifespan_context = lifespan
 
     @app.exception_handler(RequestValidationError)
     async def validation_handler(request: Request, exc: RequestValidationError):
@@ -121,7 +135,15 @@ def create_app(
             return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content=NOT_FOUND)
         return snapshot.public()
 
+    @app.get("/health", responses={503: {"description": "Not accepting work (stopping or degraded)"}})
+    async def health(request: Request):
+        # Reports this service only; the provider is never called.
+        if request.app.state.store.closed:
+            return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"status": "unavailable"})
+        return {"status": "ok"}
+
     return app
 
 
-app = create_app()
+app = FastAPI(title=TITLE)
+configure(app)
