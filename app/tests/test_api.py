@@ -107,6 +107,50 @@ class CreateTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res.json(), {"detail": "store_full"})
 
 
+class IdempotencyKeyTest(unittest.IsolatedAsyncioTestCase):
+    async def create(self, client, text="x", key="order-42"):
+        return await client.post("/v1/requests", json={"user_input": text}, headers={"Idempotency-Key": key})
+
+    async def test_repeat_with_same_key_and_body_replays_the_original_id(self):
+        async with running_app() as (app, client):
+            first, again = await self.create(client), await self.create(client)
+            self.assertEqual((first.status_code, again.status_code), (201, 201))
+            self.assertEqual(again.json(), first.json())
+            self.assertNotIn("idempotent-replayed", first.headers)
+            self.assertEqual(again.headers["idempotent-replayed"], "true")
+            self.assertEqual(len(app.state.store), 1)
+
+    async def test_replay_after_processing_does_not_trigger_new_work(self):
+        upstream = ScriptedUpstream()
+        async with running_app(upstream=upstream) as (app, client):
+            rid = (await self.create(client)).json()["id"]
+            await client.post(f"/v1/requests/{rid}/process")
+            await wait_for(lambda: app.state.store.get(rid).status.terminal)
+            self.assertEqual((await self.create(client)).json(), {"id": rid})
+            self.assertEqual(len(upstream.ai_requests), 1)
+
+    async def test_same_key_with_different_body_is_rejected(self):
+        async with running_app() as (app, client):
+            await self.create(client, text="x")
+            res = await self.create(client, text="y")
+            self.assertEqual((res.status_code, res.json()), (422, {"detail": "idempotency_key_reused"}))
+            self.assertEqual(len(app.state.store), 1)
+
+    async def test_malformed_keys_are_rejected_without_creating(self):
+        async with running_app() as (app, client):
+            for key in ("", " lead", "has space", "k" * 256, "clé"):
+                with self.subTest(key=key):
+                    res = await client.post(
+                        "/v1/requests", json={"user_input": "x"}, headers={"Idempotency-Key": key.encode()}
+                    )
+                    self.assertEqual((res.status_code, res.json()), (400, {"detail": "invalid_idempotency_key"}))
+            self.assertEqual(len(app.state.store), 0)
+
+    async def test_longest_allowed_key_is_accepted(self):
+        async with running_app() as (app, client):
+            self.assertEqual((await self.create(client, key="k" * 255)).status_code, 201)
+
+
 class UnknownIdTest(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_ids_return_404(self):
         upstream = ScriptedUpstream()

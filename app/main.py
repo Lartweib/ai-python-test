@@ -4,12 +4,13 @@ import asyncio
 import logging
 import os
 import random
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import Awaitable, Callable
 
 import httpx
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Header, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -17,13 +18,22 @@ from models import RequestCreated, RequestStatus, create_request_model
 from pipeline import Pipeline
 from provider_client import ProviderClient, build_http_client
 from settings import Settings
-from store import AdmitResult, QueueFull, RequestNotFound, RequestStore, ShuttingDown, StoreFull
+from store import (
+    AdmitResult,
+    IdempotencyMismatch,
+    QueueFull,
+    RequestNotFound,
+    RequestStore,
+    ShuttingDown,
+    StoreFull,
+)
 
 logging.basicConfig(level=os.environ.get("NOTIFY_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per upstream call is too noisy under load
 
 TITLE = "Notification Service (Technical Test)"
 NOT_FOUND = {"detail": "request_not_found"}
+IDEMPOTENCY_KEY = re.compile(r"[\x21-\x7e]{1,255}")  # visible ASCII, no spaces
 
 
 def _unavailable(reason: str) -> JSONResponse:
@@ -99,15 +109,37 @@ def configure(
     async def validation_handler(request: Request, exc: RequestValidationError):
         return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": _sanitized_errors(exc)})
 
-    @app.post("/v1/requests", status_code=status.HTTP_201_CREATED, response_model=RequestCreated)
-    async def create_request(body: CreateRequest, request: Request):  # type: ignore[valid-type]
+    @app.post(
+        "/v1/requests",
+        status_code=status.HTTP_201_CREATED,
+        response_model=RequestCreated,
+        responses={
+            400: {"description": "Malformed Idempotency-Key"},
+            422: {"description": "Invalid body, or Idempotency-Key reused with a different body"},
+        },
+    )
+    async def create_request(
+        body: CreateRequest,  # type: ignore[valid-type]
+        request: Request,
+        idempotency_key: str | None = Header(default=None, description="Optional; repeats return the original id"),
+    ):
+        store = request.app.state.store
+        replayed = False
         try:
-            snapshot = request.app.state.store.create(body.user_input)
+            if idempotency_key is None:
+                snapshot = store.create(body.user_input)
+            elif not IDEMPOTENCY_KEY.fullmatch(idempotency_key):
+                return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": "invalid_idempotency_key"})
+            else:
+                snapshot, replayed = store.create_idempotent(body.user_input, idempotency_key)
+        except IdempotencyMismatch:
+            return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": "idempotency_key_reused"})
         except StoreFull:
             return _unavailable("store_full")
         except ShuttingDown:
             return _unavailable("shutting_down")
-        return {"id": snapshot.id}
+        headers = {"Idempotent-Replayed": "true"} if replayed else None
+        return JSONResponse(status_code=status.HTTP_201_CREATED, content={"id": snapshot.id}, headers=headers)
 
     @app.post(
         "/v1/requests/{request_id}/process",
